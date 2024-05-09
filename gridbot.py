@@ -1,10 +1,10 @@
 """ADD MODULE DOCSTRING"""
 
-import asyncio
 from http.client import RemoteDisconnected
 import os
 from statistics import mean
-from time import time
+from time import sleep, time
+from types import MethodType
 from typing import Dict, List
 
 import eth_account
@@ -55,13 +55,13 @@ class GridBot():
         """Calculates the current value for the 50 hour simple moving average"""
         end_time = self.get_current_time()
         start_time = end_time - 50*60*60*1000
-        candles = self.info.candles_snapshot(self.market, '1h', start_time, end_time)
+        candles = self.safe_external_call(self.info.candles_snapshot, self.market, '1h', start_time, end_time)
         candle_closes = [float(candle['c']) for candle in candles]
         return mean(candle_closes)
 
     def open_limit_order(self, gridline: int, is_buy: bool, size: float, limit_price: float) -> int:
         """Opens a new limit order"""
-        order_result = self.exchange.order(self.market, is_buy, size, limit_price, {"limit": {"tif": "Gtc"}})
+        order_result = self.safe_external_call(self.exchange.order,self.market, is_buy, size, limit_price, {"limit": {"tif": "Gtc"}})
         try:
             order_id = order_result["response"]["data"]["statuses"][0]["resting"]["oid"]
         except KeyError:
@@ -74,13 +74,13 @@ class GridBot():
 
     def close_limit_order(self, order_id: int) -> bool:
         """Closes limit order with specified order id"""
-        cancel_result = self.exchange.cancel(self.market, order_id)
+        cancel_result = self.safe_external_call(self.exchange.cancel, self.market, order_id)
         # I should be resetting the dictionary entry here, right? Or should I? That really only needs to be changed upon fill other than order_id,  and I've got that handled.
         return cancel_result["status"] == "ok"  # make sure this is the correct status (or remove it, who cares)
 
     def cancel_all_orders(self):
         """Cancels all open limit orders"""
-        open_orders = self.info.open_orders(self.exchange.account_address)
+        open_orders = self.safe_external_call(self.info.open_orders, self.exchange.account_address)
         for order in open_orders:
             self.close_limit_order(order["oid"])
             self.order_id_to_gridline.pop(order["oid"], None)  # do i need to keep this entry if the order has been filled? Well, I guess it wouldn't show up here if it was...
@@ -94,41 +94,45 @@ class GridBot():
         self.grid = Grid(sma_price, self.size_grid_interval, self.num_grid_intervals)
         current_price = self.get_current_price()
         for i, gridline in enumerate(self.grid.lines):
+            # I need to change the below if statement now that fills are separated into buy and sell
+            if self.gridline_to_order[i][1] != self.unit_size or self.gridline_to_order[i][3] != self.unit_size:  # if not fully filled
+                #the above needs to be adjusted to allow for closing order replacement (and its currently only checking for buy order fills)
+                #so now i did allow for that but I'm wondering if the check is even needed at all atp - when would it ever be false?
+                #something does need to be there because it needs to not replace filled opening orders whose closing orders havent been filled
+                #maybe move the check down here and do like if is_buy and above gridline or vice versa(i.e. is an opening order), then don't place an order if it's filled
+                #but still makes sure that the closing order replacement below isn't nullified when it shouldn't be
+                is_buy = gridline <= sma_price
+                # these are needed to carry forward closing orders when the grid is reset
+                is_closing_long = False # i.e. is it a closing long order matching an opened short?
+                is_closing_short = False # i.e. is it a closing short order matching an opened long?
 
-            is_buy = gridline <= sma_price
-            # these are needed to carry forward closing orders when the grid is reset
-            is_closing_long = False # i.e. is it a closing long order matching an opened short?
-            is_closing_short = False # i.e. is it a closing short order matching an opened long?
+                # if gridline is above the sma and a short was filled at the gridline above it, set a buy order
+                if i < len(self.grid.lines) - 1 and gridline >= sma_price and self.gridline_to_order[i+1][3] > 0:  # same as below, I think I can just delete this /// No you can't delete it because you need to make sure the fill response orders are kept around after all orders are cancelled And along those lines I think you need to include something in this function to update the closing_order_to_opening_order dictionary where necessary.
+                    is_buy = True
+                    is_closing_long = True
+                # if gridline is below the sma and a buy was filled at the gridline below it, set a sell order
+                elif i > 0 and gridline <= sma_price and self.gridline_to_order[i-1][1] > 0:  # this needs to be changed with the way I've got this handled in check_fills. I don't think I even need to worry about fills ehre anymore.
+                    is_buy = False
+                    is_closing_short = True
+                # if the gridline is between price and sma and no adjacent order filled, do nothing
+                elif current_price > gridline > sma_price or sma_price > gridline > current_price:
+                    continue
 
-            # if gridline is above the sma and a short was filled at the gridline above it, set a buy order
-            if i < len(self.grid.lines) - 1 and gridline >= sma_price and self.gridline_to_order[i+1][3] > 0:  # same as below, I think I can just delete this /// No you can't delete it because you need to make sure the fill response orders are kept around after all orders are cancelled And along those lines I think you need to include something in this function to update the closing_order_to_opening_order dictionary where necessary.
-                is_buy = True
-                is_closing_long = True
-            # if gridline is below the sma and a buy was filled at the gridline below it, set a sell order
-            elif i > 0 and gridline <= sma_price and self.gridline_to_order[i-1][1] > 0:  # this needs to be changed with the way I've got this handled in check_fills. I don't think I even need to worry about fills ehre anymore.
-                is_buy = False
-                is_closing_short = True
-            # if the gridline is between price and sma and no adjacent order filled, do nothing
-            elif current_price > gridline > sma_price or sma_price > gridline > current_price:
-                continue
+                #if an opening order has been filled
+                if is_buy and not is_closing_long and self.gridline_to_order[i][1] == self.unit_size:
+                    continue
 
-            #if an opening order has been filled but its matching losing order has not been filled, do not re-set that order
-            if not is_buy and not is_closing_long and self.gridline_to_order[i][3] == self.unit_size:
-                continue
-            if is_buy and not is_closing_short and self.gridline_to_order[i][1] == self.unit_size:
-                continue
-
-            order_id = self.open_limit_order(
-                i,
-                is_buy,
-                self.unit_size - self.gridline_to_order[i][1 if is_buy else 3],
-                gridline
-            )
-            self.gridline_to_order[i][0 if is_buy else 2] = order_id
-            if is_closing_long:
-                self.closing_order_to_opening_order[order_id] = self.gridline_to_order[i+1][2]
-            if is_closing_short:
-                self.closing_order_to_opening_order[order_id] = self.gridline_to_order[i-1][0]
+                order_id = self.open_limit_order(
+                    i,
+                    is_buy,
+                    self.unit_size - self.gridline_to_order[i][1 if is_buy else 3],
+                    gridline
+                )
+                self.gridline_to_order[i][0 if is_buy else 2] = order_id
+                if is_closing_long:
+                    self.closing_order_to_opening_order[order_id] = self.gridline_to_order[i+1][2]
+                if is_closing_short:
+                    self.closing_order_to_opening_order[order_id] = self.gridline_to_order[i-1][0]
         # DEBUGGING
         print(f"\n Gridline to order: {self.gridline_to_order} \n")
         print(f"order id to gridline: {self.order_id_to_gridline} \n")
@@ -136,7 +140,7 @@ class GridBot():
 
     def check_fills(self):
         """Match fills to previously open orders"""
-        fills = self.info.user_fills(self.exchange.account_address)[:self.num_grid_intervals] #It might be most recent fills at the START of the array here (im pretty sure it is)  # need to account for if there arent enough entries in the list for this slice
+        fills = self.safe_external_call(self.info.user_fills, self.exchange.account_address)[:self.num_grid_intervals] #It might be most recent fills at the START of the array here (im pretty sure it is)  # need to account for if there arent enough entries in the list for this slice
         order_ids = [fill["oid"] for fill in fills]
         active_fill_ids = set(list(set(order_ids) & set(self.order_id_to_gridline.keys())))
         # DEBUGGING
@@ -194,14 +198,14 @@ class GridBot():
 
     def get_current_price(self) -> float:
         """Returns the midpoint between current bid and ask prices"""
-        return float(self.info.all_mids()[self.market])
+        return float(self.safe_external_call(self.info.all_mids)[self.market])
 
     @staticmethod
     def get_current_time() -> int:
         """returns current unix timestamp in milliseconds"""
         return int(time()*1000 // 1)
 
-    async def run(self):
+    def run(self):
         """Main function loop"""
         while True:
             # calculate new sma and reset grid hourly
@@ -211,15 +215,15 @@ class GridBot():
                 self.epochs += 1
             # check for fills
             self.check_fills()
-            await asyncio.sleep(15)
+            sleep(15)
 
     def close(self):
         """Ends the bot's current session"""
         print("Winding down all open orders and positions...")
         while True:
-            try:
+            try:#probably don't even need this try/except with safe_external call
                 self.cancel_all_orders()
-                self.exchange.market_close(self.market)
+                self.safe_external_call(self.exchange.market_close, self.market)
                 break
             except (RemoteDisconnected, ConnectionError):
                 self.reestablish_connection()
@@ -235,15 +239,32 @@ class GridBot():
         self.info = Info(constants.MAINNET_API_URL if not self.test_run else constants.TESTNET_API_URL, skip_ws=True)
         print("Successfully reconnected.")
 
+    def safe_external_call(self, function, *args, **kwargs):
+        """Handles connection errors for all Hyperliquid api calls"""
+
+        attempt = 0
+        while attempt < 3:
+            try:
+                return function(*args, **kwargs)  # Execute the provided function with given args
+            except (RemoteDisconnected, ConnectionError) as e:
+                attempt += 1
+                self.reestablish_connection()
+                print(f"Network error: {e}. Retrying ({attempt}/{3}) in 5 seconds...")
+                sleep(5)
+            except Exception as e:
+                print(f"Unexpected error {e}")
+                raise
+        raise Exception(f"Failed to complete external call after 3 retries.")
+
 
 if __name__ == "__main__":
     bot = GridBot()
     while True:
         try:
-            asyncio.run(bot.run())
-        except (RemoteDisconnected, ConnectionError):
-            asyncio.run(bot.reestablish_connection())
+            bot.run()
+        except (RemoteDisconnected, ConnectionError):#probably don't even need this except with safe_external call
+            bot.reestablish_connection()
         except KeyboardInterrupt:
             # might put a try/except here to avoid that coroutine error can just have pass in the except since it's doing evrerything it needs to do on close
-            asyncio.run(bot.close())
+            bot.close()
             break
