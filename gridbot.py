@@ -4,7 +4,6 @@ from http.client import RemoteDisconnected
 import os
 from statistics import mean
 from time import sleep, time
-from types import MethodType
 from typing import Dict, List
 
 import eth_account
@@ -14,8 +13,13 @@ from hyperliquid.info import Info
 from hyperliquid.utils import constants
 
 from grid import Grid
+from logger_config import LoggerConfig
+
+logger_config = LoggerConfig()
+log = logger_config.get_logger()
 
 load_dotenv()
+
 
 
 class GridBot():
@@ -65,10 +69,10 @@ class GridBot():
         try:
             order_id = order_result["response"]["data"]["statuses"][0]["resting"]["oid"]
         except KeyError:
-            print(f"Failed to place order: {order_result}")
+            log.warning(f"Failed to place order: {order_result}")
             # self.open_limit_order(gridline, is_buy, size, limit_price)  # This resulted in infinite recursion or some shit
             return -1 #really should do a better job handling this error - retry setting the order? Could just call itself with the same inputs
-        print(f"{size} {self.market} {'buy' if is_buy else 'sell'} order placed at {limit_price}.")
+        log.info(f"{size} {self.market} {'buy' if is_buy else 'sell'} order placed at {limit_price}.")
         self.order_id_to_gridline[order_id] = gridline
         return order_id
 
@@ -88,7 +92,7 @@ class GridBot():
 
     def reset_grid(self, sma_price: float):
         """Adjusts grid based on current sma location"""
-        print("\nResetting grid...\n")
+        log.info("\nResetting grid...\n")
         self.cancel_all_orders()
         # self.check_fills()  # do I need this in here since it's also being called in run()? I don't think I do
         self.grid = Grid(sma_price, self.size_grid_interval, self.num_grid_intervals)
@@ -134,9 +138,9 @@ class GridBot():
                 if is_closing_short:
                     self.closing_order_to_opening_order[order_id] = self.gridline_to_order[i-1][0]
         # DEBUGGING
-        print(f"\n Gridline to order: {self.gridline_to_order} \n")
-        print(f"order id to gridline: {self.order_id_to_gridline} \n")
-        print(f"closing order to opening: {self.closing_order_to_opening_order} \n")
+        log.info(f"\n Gridline to order: {self.gridline_to_order} \n")
+        log.info(f"order id to gridline: {self.order_id_to_gridline} \n")
+        log.info(f"closing order to opening: {self.closing_order_to_opening_order} \n")
 
     def check_fills(self):
         """Match fills to previously open orders"""
@@ -148,12 +152,12 @@ class GridBot():
         active_fills = [fill for fill in fills if fill["oid"] in active_fill_ids and fill["hash"] not in self.seen_fill_hashes]  # need to have this also filter for orders who don't have active closing orders already. But be careful because in the case of partial fills you'd still want to add to the respective order even if a closing/opening order exists. I might ahve to stop re-upping orders if I can't figure this out better. Cus then i could just have a set of seen fill order ids.actually it's probably creating a new order id when i re-up, right? I'd have to check that. cus then it'd be fine.   
         # DEBUGGING
         # print(fills)
-        print(f"As of {time()}, these are the fills: {active_fills}")
+        log.info(f"As of {time()}, these are the fills: {active_fills}")
         # print(f"and just cus, I'm printing the # of fills: {len(fills)} and the active fills: {active_fill_ids}")
         # print(f"and my order_ids: {order_ids} and gridline order ids: {self.order_id_to_gridline.keys()}")
         for fill in active_fills:
             self.seen_fill_hashes.add(fill["hash"])
-            print(f"Order filled at ${fill['px']} for {fill['sz']} {self.market}!")
+            log.info(f"Order filled at ${fill['px']} for {fill['sz']} {self.market}!")
             if fill['dir'] == 'Open Long':
                 self.gridline_to_order[self.order_id_to_gridline[fill['oid']]][1] += float(fill['sz'])  # but this wouldn't use the order  id of this fill, right? it'd be for the corresponding long fill above? Do I need a new mapping to match closing orders with their corresponding opening orders to handle this? Or do I even need to track that? I guess I do since how else would it know to set a new order where one has been filled but then closed already in the session
                 # use gridline + 1 since you're setting the closing order as a sell on the gridline above
@@ -219,7 +223,7 @@ class GridBot():
 
     def close(self):
         """Ends the bot's current session"""
-        print("Winding down all open orders and positions...")
+        log.info("Winding down all open orders and positions...")
         while True:
             try:#probably don't even need this try/except with safe_external call
                 self.cancel_all_orders()
@@ -230,14 +234,14 @@ class GridBot():
 
     def reestablish_connection(self):
         """Reconnect to hyperliquid"""
-        print("Connection to hyperliquid lost. Re-establishing connection...")
+        log.info("Connection to hyperliquid lost. Re-establishing connection...")
         self.exchange = Exchange(
             self.agent,
             base_url=constants.MAINNET_API_URL if not self.test_run else constants.TESTNET_API_URL,
             account_address=os.getenv("ACCOUNT_ADDRESS"),
         )
         self.info = Info(constants.MAINNET_API_URL if not self.test_run else constants.TESTNET_API_URL, skip_ws=True)
-        print("Successfully reconnected.")
+        log.info("Successfully reconnected.")
 
     def safe_external_call(self, function, *args, **kwargs):
         """Handles connection errors for all Hyperliquid api calls"""
@@ -245,14 +249,14 @@ class GridBot():
         attempt = 0
         while attempt < 3:
             try:
-                return function(*args, **kwargs)  # Execute the provided function with given args
+                return function(*args, **kwargs)  
             except (RemoteDisconnected, ConnectionError) as e:
                 attempt += 1
                 self.reestablish_connection()
-                print(f"Network error: {e}. Retrying ({attempt}/{3}) in 5 seconds...")
+                log.warning(f"Network error: {e}. Retrying ({attempt}/{3}) in 5 seconds...")
                 sleep(5)
             except Exception as e:
-                print(f"Unexpected error {e}")
+                log.warning(f"Unexpected error {e}")
                 raise
         raise Exception(f"Failed to complete external call after 3 retries.")
 
