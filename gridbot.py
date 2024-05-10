@@ -69,9 +69,12 @@ class GridBot():
         try:
             order_id = order_result["response"]["data"]["statuses"][0]["resting"]["oid"]
         except KeyError:
-            log.warning(f"Failed to place order: {order_result}")
-            # self.open_limit_order(gridline, is_buy, size, limit_price)  # This resulted in infinite recursion or some shit
-            return -1 #really should do a better job handling this error - retry setting the order? Could just call itself with the same inputs
+            try:  # if the order was market filled upon placement
+                order_id = order_result["response"]["data"]["statuses"][0]["filled"]["oid"]
+            except:
+                log.warning(f"Failed to place order: {order_result}")
+                # self.open_limit_order(gridline, is_buy, size, limit_price)  # This resulted in infinite recursion or some shit
+                return -1 #really should do a better job handling this error - retry setting the order? Could just call itself with the same inputs
         log.info(f"{size} {self.market} {'buy' if is_buy else 'sell'} order placed at {limit_price}.")
         self.order_id_to_gridline[order_id] = gridline
         return order_id
