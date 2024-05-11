@@ -1,5 +1,6 @@
 """ADD MODULE DOCSTRING"""
 
+from requests.exceptions import ConnectionError
 from http.client import RemoteDisconnected
 import os
 from statistics import mean
@@ -19,8 +20,6 @@ logger_config = LoggerConfig()
 log = logger_config.get_logger()
 
 load_dotenv()
-
-
 
 class GridBot():
     """ADD CLASS DOCSTRING"""
@@ -68,22 +67,21 @@ class GridBot():
         order_result = self.safe_external_call(self.exchange.order,self.market, is_buy, size, limit_price, {"limit": {"tif": "Gtc"}})
         try:
             order_id = order_result["response"]["data"]["statuses"][0]["resting"]["oid"]
+            log.info(f"{size} {self.market} {'buy' if is_buy else 'sell'} order placed at {limit_price}.")
         except KeyError:
             try:  # if the order was market filled upon placement
                 order_id = order_result["response"]["data"]["statuses"][0]["filled"]["oid"]
-            except:
-                log.warning(f"Failed to place order: {order_result}")
-                # self.open_limit_order(gridline, is_buy, size, limit_price)  # This resulted in infinite recursion or some shit
-                return -1 #really should do a better job handling this error - retry setting the order? Could just call itself with the same inputs
-        log.info(f"{size} {self.market} {'buy' if is_buy else 'sell'} order placed at {limit_price}.")
+                log.info(f"{size} {self.market} {'buy' if is_buy else 'sell'} order market filled at at {limit_price}.")
+            except Exception as e:
+                log.warning(f"Failed to place order: {order_result} due to exception: {e}")
+                return -1 #should probably do something with this return
         self.order_id_to_gridline[order_id] = gridline
         return order_id
 
     def close_limit_order(self, order_id: int) -> bool:
         """Closes limit order with specified order id"""
         cancel_result = self.safe_external_call(self.exchange.cancel, self.market, order_id)
-        # I should be resetting the dictionary entry here, right? Or should I? That really only needs to be changed upon fill other than order_id,  and I've got that handled.
-        return cancel_result["status"] == "ok"  # make sure this is the correct status (or remove it, who cares)
+        return cancel_result["status"] == "ok"  #either do something with this return or delete it
 
     def cancel_all_orders(self):
         """Cancels all open limit orders"""
@@ -227,13 +225,8 @@ class GridBot():
     def close(self):
         """Ends the bot's current session"""
         log.info("Winding down all open orders and positions...")
-        while True:
-            try:#probably don't even need this try/except with safe_external call
-                self.cancel_all_orders()
-                self.safe_external_call(self.exchange.market_close, self.market)
-                break
-            except (RemoteDisconnected, ConnectionError):
-                self.reestablish_connection()
+        self.cancel_all_orders()
+        self.safe_external_call(self.exchange.market_close, self.market)
 
     def reestablish_connection(self):
         """Reconnect to hyperliquid"""
