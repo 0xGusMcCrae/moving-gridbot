@@ -53,6 +53,7 @@ class GridBot():
         self.grid = None
         self.start_time = time()
         self.epochs = 0
+        self.session_pnl = 0
 
     def calculate_sma(self) -> float:
         """Calculates the current value for the 50 hour simple moving average"""
@@ -93,7 +94,7 @@ class GridBot():
 
     def reset_grid(self, sma_price: float):
         """Adjusts grid based on current sma location"""
-        log.info("\nResetting grid...\n")
+        log.info("Resetting grid...\n")
         self.cancel_all_orders()
         # self.check_fills()  # do I need this in here since it's also being called in run()? I don't think I do
         self.grid = Grid(sma_price, self.size_grid_interval, self.num_grid_intervals)
@@ -112,19 +113,20 @@ class GridBot():
                 is_closing_short = False # i.e. is it a closing short order matching an opened long?
 
                 # if gridline is above the sma and a short was filled at the gridline above it, set a buy order
-                if i < len(self.grid.lines) - 1 and gridline >= sma_price and self.gridline_to_order[i+1][3] > 0:  # same as below, I think I can just delete this /// No you can't delete it because you need to make sure the fill response orders are kept around after all orders are cancelled And along those lines I think you need to include something in this function to update the closing_order_to_opening_order dictionary where necessary.
+                if i < len(self.grid.lines) - 1 and gridline >= sma_price and self.gridline_to_order[i+1][3] > 0:  
                     is_buy = True
                     is_closing_long = True
                 # if gridline is below the sma and a buy was filled at the gridline below it, set a sell order
-                elif i > 0 and gridline <= sma_price and self.gridline_to_order[i-1][1] > 0:  # this needs to be changed with the way I've got this handled in check_fills. I don't think I even need to worry about fills ehre anymore.
+                elif i > 0 and gridline <= sma_price and self.gridline_to_order[i-1][1] > 0:  
                     is_buy = False
                     is_closing_short = True
                 # if the gridline is between price and sma and no adjacent order filled, do nothing
                 elif current_price > gridline > sma_price or sma_price > gridline > current_price:
                     continue
 
-                #if an opening order has been filled
-                if is_buy and not is_closing_long and self.gridline_to_order[i][1] == self.unit_size:
+                #if an opening order has been filled already
+                if ((is_buy and not is_closing_long and self.gridline_to_order[i][1] == self.unit_size) or
+                    (not is_buy and not is_closing_short and self.gridline_to_order[i][3] == self.unit_size)):
                     continue
 
                 order_id = self.open_limit_order(
@@ -139,9 +141,10 @@ class GridBot():
                 if is_closing_short:
                     self.closing_order_to_opening_order[order_id] = self.gridline_to_order[i-1][0]
         # DEBUGGING
-        log.info(f"\n Gridline to order: {self.gridline_to_order} \n")
-        log.info(f"order id to gridline: {self.order_id_to_gridline} \n")
-        log.info(f"closing order to opening: {self.closing_order_to_opening_order} \n")
+        log.info(f"\n Gridline to order: {self.gridline_to_order}\n")
+        log.info(f"order id to gridline: {self.order_id_to_gridline}\n")
+        log.info(f"closing order to opening: {self.closing_order_to_opening_order}\n")
+        log.info(f"Current session pnl: {self.session_pnl}\n")
 
     def check_fills(self):
         """Match fills to previously open orders"""
@@ -159,6 +162,7 @@ class GridBot():
         for fill in active_fills:
             self.seen_fill_hashes.add(fill["hash"])
             log.info(f"Order filled at ${fill['px']} for {fill['sz']} {self.market}!")
+            self.session_pnl += float(fill["closedPnl"])
             if fill['dir'] == 'Open Long':
                 self.gridline_to_order[self.order_id_to_gridline[fill['oid']]][1] += float(fill['sz'])  # but this wouldn't use the order  id of this fill, right? it'd be for the corresponding long fill above? Do I need a new mapping to match closing orders with their corresponding opening orders to handle this? Or do I even need to track that? I guess I do since how else would it know to set a new order where one has been filled but then closed already in the session
                 # use gridline + 1 since you're setting the closing order as a sell on the gridline above
