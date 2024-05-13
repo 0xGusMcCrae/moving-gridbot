@@ -1,0 +1,6 @@
+.env
+notes.md
+__pycache__/
+.ruff_cache/
+.mypy_cache/
+logs/

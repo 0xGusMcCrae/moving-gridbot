@@ -228,29 +228,31 @@ class GridBot():
     def reestablish_connection(self):
         """Reconnect to hyperliquid"""
         log.info("Connection to hyperliquid lost. Re-establishing connection...")
-        self.exchange = Exchange(
-            self.agent,
-            base_url=constants.MAINNET_API_URL if not self.test_run else constants.TESTNET_API_URL,
-            account_address=os.getenv("ACCOUNT_ADDRESS"),
-        )
-        self.info = Info(constants.MAINNET_API_URL if not self.test_run else constants.TESTNET_API_URL, skip_ws=True)
+        connected = False
+        while not connected:
+            try:
+                self.exchange = Exchange(
+                    self.agent,
+                    base_url=constants.MAINNET_API_URL if not self.test_run else constants.TESTNET_API_URL,
+                    account_address=os.getenv("ACCOUNT_ADDRESS"),
+                )
+                self.info = Info(constants.MAINNET_API_URL if not self.test_run else constants.TESTNET_API_URL, skip_ws=True)
+                connected = True
+            except Exception as e:
+                log.warning(f"Reconnection attempt failed with exception: {e}. Reattempting...")
+                sleep(5)
         log.info("Successfully reconnected.")
 
     def safe_external_call(self, function, *args, **kwargs):
         """Handles connection errors for all Hyperliquid api calls"""
 
-        attempt = 0
-        while attempt < 3:
-            try:
-                return function(*args, **kwargs)
-            except (RemoteDisconnected, ConnectionError) as e:
-                attempt += 1
-                self.reestablish_connection()
-                log.warning(f"Network error: {e}. Retrying ({attempt}/{3}) in 5 seconds...")
-                sleep(5)
-            except Exception as e:
-                log.warning(f"Unexpected error {e}")
-                raise
+        try:
+            return function(*args, **kwargs)
+        except (RemoteDisconnected, ConnectionError) as e:
+            self.reestablish_connection()
+        except Exception as e:
+            log.warning(f"Unexpected error {e}")
+            raise
         raise Exception("Failed to complete external call after 3 retries.")
 
 
