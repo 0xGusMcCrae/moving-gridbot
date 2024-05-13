@@ -1,6 +1,5 @@
 """ADD MODULE DOCSTRING"""
 
-from requests.exceptions import ConnectionError
 from http.client import RemoteDisconnected
 import os
 from statistics import mean
@@ -12,6 +11,7 @@ from dotenv import load_dotenv
 from hyperliquid.exchange import Exchange
 from hyperliquid.info import Info
 from hyperliquid.utils import constants
+from requests.exceptions import ConnectionError
 
 from grid import Grid
 from logger_config import LoggerConfig
@@ -108,25 +108,20 @@ class GridBot():
                 #maybe move the check down here and do like if is_buy and above gridline or vice versa(i.e. is an opening order), then don't place an order if it's filled
                 #but still makes sure that the closing order replacement below isn't nullified when it shouldn't be
                 is_buy = gridline <= sma_price
-                # these are needed to carry forward closing orders when the grid is reset
-                is_closing_long = False # i.e. is it a closing long order matching an opened short?
-                is_closing_short = False # i.e. is it a closing short order matching an opened long?
-
+                
                 # if gridline is above the sma and a short was filled at the gridline above it, set a buy order
-                if i < len(self.grid.lines) - 1 and gridline >= sma_price and self.gridline_to_order[i+1][3] > 0:  
+                if i < len(self.grid.lines) - 1 and gridline >= sma_price and self.gridline_to_order[i+1][3] > 0:
                     is_buy = True
-                    is_closing_long = True
                 # if gridline is below the sma and a buy was filled at the gridline below it, set a sell order
-                elif i > 0 and gridline <= sma_price and self.gridline_to_order[i-1][1] > 0:  
+                elif i > 0 and gridline <= sma_price and self.gridline_to_order[i-1][1] > 0:
                     is_buy = False
-                    is_closing_short = True
                 # if the gridline is between price and sma and no adjacent order filled, do nothing
                 elif current_price > gridline > sma_price or sma_price > gridline > current_price:
                     continue
 
                 #if an opening order has been filled already
-                if ((is_buy and not is_closing_long and self.gridline_to_order[i][1] == self.unit_size) or
-                    (not is_buy and not is_closing_short and self.gridline_to_order[i][3] == self.unit_size)):
+                if ((is_buy and self.gridline_to_order[i][1] >= self.unit_size) or
+                    (not is_buy and self.gridline_to_order[i][3] >= self.unit_size)):
                     continue
 
                 order_id = self.open_limit_order(
@@ -136,29 +131,27 @@ class GridBot():
                     gridline
                 )
                 self.gridline_to_order[i][0 if is_buy else 2] = order_id
-                if is_closing_long:
-                    self.closing_order_to_opening_order[order_id] = self.gridline_to_order[i+1][2]
-                if is_closing_short:
-                    self.closing_order_to_opening_order[order_id] = self.gridline_to_order[i-1][0]
+        # update closing->opening order mapping
+        for i in range(1, len(self.gridline_to_order)//2):  # items below the sma midline - any sells here indicate a closing order
+            if self.gridline_to_order[i][2] and self.gridline_to_order[i][3] < self.unit_size:  # order is open and not filled
+                self.closing_order_to_opening_order[self.gridline_to_order[i][2]] = self.gridline_to_order[i-1][0]
+        for i in range(len(self.gridline_to_order)//2+1, len(self.gridline_to_order)):  # items above the sma midline - any buys here indicate a closing order
+            if self.gridline_to_order[i][0] and self.gridline_to_order[i][1] < self.unit_size:  # order is open and not filled
+                self.closing_order_to_opening_order[self.gridline_to_order[i][0]] = self.gridline_to_order[i+1][2]
         # DEBUGGING
         log.info(f"\n Gridline to order: {self.gridline_to_order}\n")
         log.info(f"order id to gridline: {self.order_id_to_gridline}\n")
         log.info(f"closing order to opening: {self.closing_order_to_opening_order}\n")
-        log.info(f"Current session pnl: {self.session_pnl}\n")
+        # END DEBUGGING
+        log.info(f"Current session pnl: ${self.session_pnl}\n")
 
     def check_fills(self):
         """Match fills to previously open orders"""
         fills = self.safe_external_call(self.info.user_fills, self.exchange.account_address)[:self.num_grid_intervals] #It might be most recent fills at the START of the array here (im pretty sure it is)  # need to account for if there arent enough entries in the list for this slice
         order_ids = [fill["oid"] for fill in fills]
         active_fill_ids = set(list(set(order_ids) & set(self.order_id_to_gridline.keys())))
-        # DEBUGGING
-        # print(f"closing to opening order values: {self.closing_order_to_opening_order.values()}") # I don't think this is gonna ever populate with the added check below
         active_fills = [fill for fill in fills if fill["oid"] in active_fill_ids and fill["hash"] not in self.seen_fill_hashes]  # need to have this also filter for orders who don't have active closing orders already. But be careful because in the case of partial fills you'd still want to add to the respective order even if a closing/opening order exists. I might ahve to stop re-upping orders if I can't figure this out better. Cus then i could just have a set of seen fill order ids.actually it's probably creating a new order id when i re-up, right? I'd have to check that. cus then it'd be fine.   
-        # DEBUGGING
-        # print(fills)
         log.info(f"As of {time()}, these are the fills: {active_fills}")
-        # print(f"and just cus, I'm printing the # of fills: {len(fills)} and the active fills: {active_fill_ids}")
-        # print(f"and my order_ids: {order_ids} and gridline order ids: {self.order_id_to_gridline.keys()}")
         for fill in active_fills:
             self.seen_fill_hashes.add(fill["hash"])
             log.info(f"Order filled at ${fill['px']} for {fill['sz']} {self.market}!")
@@ -249,7 +242,7 @@ class GridBot():
         attempt = 0
         while attempt < 3:
             try:
-                return function(*args, **kwargs)  
+                return function(*args, **kwargs)
             except (RemoteDisconnected, ConnectionError) as e:
                 attempt += 1
                 self.reestablish_connection()
@@ -258,7 +251,7 @@ class GridBot():
             except Exception as e:
                 log.warning(f"Unexpected error {e}")
                 raise
-        raise Exception(f"Failed to complete external call after 3 retries.")
+        raise Exception("Failed to complete external call after 3 retries.")
 
 
 if __name__ == "__main__":

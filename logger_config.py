@@ -14,7 +14,7 @@ class LoggerConfig:
         # Ensure the log directory exists
         if not os.path.exists(log_dir):
             os.makedirs(log_dir)
-     
+
         # Create a new logger with the provided name
         self.logger = logging.getLogger(name)
         self.logger.setLevel(logging.INFO)
