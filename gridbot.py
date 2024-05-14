@@ -238,10 +238,11 @@ class GridBot():
                 )
                 self.info = Info(constants.MAINNET_API_URL if not self.test_run else constants.TESTNET_API_URL, skip_ws=True)
                 connected = True
+                log.info("Successfully reconnected.")
             except Exception as e:
                 log.warning(f"Reconnection attempt failed with exception: {e}. Reattempting...")
                 sleep(5)
-        log.info("Successfully reconnected.")
+        
 
     def safe_external_call(self, function, *args, **kwargs):
         """Handles connection errors for all Hyperliquid api calls"""
@@ -253,7 +254,7 @@ class GridBot():
         except Exception as e:
             log.warning(f"Unexpected error {e}")
             raise
-        raise Exception("Failed to complete external call after 3 retries.")
+        raise Exception("Failed to complete external call.")
 
 
 if __name__ == "__main__":
@@ -264,6 +265,6 @@ if __name__ == "__main__":
         except (RemoteDisconnected, ConnectionError):#probably don't even need this except with safe_external call
             bot.reestablish_connection()
         except KeyboardInterrupt:
-            # might put a try/except here to avoid that coroutine error can just have pass in the except since it's doing evrerything it needs to do on close
+            log.info("Keyboard interrupt")
             bot.close()
             break
