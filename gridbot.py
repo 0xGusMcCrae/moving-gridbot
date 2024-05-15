@@ -228,8 +228,7 @@ class GridBot():
     def reestablish_connection(self):
         """Reconnect to hyperliquid"""
         log.info("Connection to hyperliquid lost. Re-establishing connection...")
-        connected = False
-        while not connected:
+        while True:
             try:
                 self.exchange = Exchange(
                     self.agent,
@@ -237,8 +236,8 @@ class GridBot():
                     account_address=os.getenv("ACCOUNT_ADDRESS"),
                 )
                 self.info = Info(constants.MAINNET_API_URL if not self.test_run else constants.TESTNET_API_URL, skip_ws=True)
-                connected = True
                 log.info("Successfully reconnected.")
+                return
             except Exception as e:
                 log.warning(f"Reconnection attempt failed with exception: {e}. Reattempting...")
                 sleep(5)
@@ -246,15 +245,14 @@ class GridBot():
 
     def safe_external_call(self, function, *args, **kwargs):
         """Handles connection errors for all Hyperliquid api calls"""
-
-        try:
-            return function(*args, **kwargs)
-        except (RemoteDisconnected, ConnectionError) as e:
-            self.reestablish_connection()
-        except Exception as e:
-            log.warning(f"Unexpected error {e}")
-            raise
-        raise Exception("Failed to complete external call.")
+        while True:
+            try:
+                return function(*args, **kwargs)
+            except (RemoteDisconnected, ConnectionError) as e:
+                self.reestablish_connection()
+            except Exception as e:
+                log.warning(f"Unexpected error {e}")
+                raise
 
 
 if __name__ == "__main__":
